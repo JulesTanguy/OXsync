@@ -1,4 +1,4 @@
-# oxsync - File Synchronization Tool in Rust
+# oxsync - a file synchronization tool in Rust
 
 Welcome to oxsync ! This project is shaping up to redefine file synchronization using Rust, primarily designed with a strong focus on the "watch for changes" feature.
 
@@ -8,18 +8,29 @@ oxsync is geared towards enabling fast, local reads with a remote filesystem. Th
 
 ## Key Features (Planned)
 
-- Real-time "watch for changes" functionality for swift synchronization.
-- User-friendly interface with intuitive commands.
+- Real-time "watch for changes" functionality for immediate synchronization.
+- CLI interface with intuitive commands.
 - Local mirroring of remote file system for quick reads.
-- Integrity checks with BLAKE3
-- Initial copy builtin into the program
+- An optional, initial copy builtin into the tool
 - Display diffs on each change
 - Good handling of big and small files
 - An "exclude" argument with glob pattern support
+- Tested and fully functional on Linux, macOS and Windows
 
 ## Installation
 
 As this is an ongoing project, **DO NOT USE FOR A PRODUCTION SETUP**.
+
+```sh
+# Beforehand make sure to have a functional Rust compiler and the Cargo package manager installed
+
+# Cloning the repo and change the working directory
+git clone https://github.com/JulesTanguy/oxsync.git
+cd oxsync
+
+# Compiling, once this command complete, the binary files will be available in the 'target/release' directory.
+cargo build --release
+```
 
 ## Acknowledgements
 
