@@ -1,6 +1,6 @@
 # oxsync - a file synchronization tool in Rust
 
-Welcome to oxsync ! This project is shaping up to redefine file synchronization using Rust, primarily designed with a strong focus on the "watch for changes" feature.
+This project is shaping up to redefine file synchronization using Rust, primarily designed with a strong focus on the "watch for changes" feature.
 
 ## Purpose
 
@@ -22,13 +22,15 @@ oxsync is geared towards enabling fast, local reads with a remote filesystem. Th
 As this is an ongoing project, **DO NOT USE FOR A PRODUCTION SETUP**.
 
 ```sh
-# Beforehand make sure to have a functional Rust compiler and the Cargo package manager installed
+# Beforehand make sure to have a functional Rust compiler and 
+# the Cargo package manager installed
 
 # Cloning the repo and change the working directory
 git clone https://github.com/JulesTanguy/oxsync.git
 cd oxsync
 
-# Compiling, once this command complete, the binary files will be available in the 'target/release' directory.
+# Compiling, once this command complete, 
+# the binary files will be available in the 'target/release' directory.
 cargo build --release
 ```
 
