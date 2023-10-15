@@ -1,4 +1,8 @@
+mod file_operations;
+use file_operations::FileOperationsManager;
+
 use std::collections::HashMap;
+use std::error::Error;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -10,31 +14,58 @@ use futures::{
     SinkExt, StreamExt,
 };
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
-use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::{ModifyKind, RenameMode};
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use time_macros::format_description;
 use tokio::io::AsyncReadExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
+use tracing::{error, warn};
+use tracing_subscriber::fmt::time;
 
 /// Simple program to sync changes from one dir to an other
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, long_about = None)]
 struct Args {
-    /// Name of the directory to watch changes from
+    /// path of the directory to watch changes from
     #[arg(short, long, required(true))]
     source_dir: String,
+    /// path of the directory to write changes to
+    #[arg(short, long, required(true))]
+    target_dir: String,
 }
 
+type BoxedError = Box<dyn Error + Send + Sync>;
+pub type ConcurrentFileStore = Arc<RwLock<HashMap<PathBuf, Vec<u8>>>>;
+const MAX_RWLOCK_READERS: u32 = 2048;
+
 #[tokio::main]
-async fn main() -> Result<()> {
-    get_all().await?;
+async fn main() -> Result<(), BoxedError> {
+    tracing_subscriber::fmt()
+        .with_timer(time::LocalTime::new(format_description!(
+            "[hour]:[minute]:[second].[subsecond digits:3]"
+        )))
+        .with_target(false)
+        .init();
+
+    if let Err(err) = get_all().await {
+        error!("{}", err.to_string())
+    };
     Ok(())
 }
 
-async fn get_all() -> Result<()> {
+async fn get_all() -> Result<(), BoxedError> {
     let args = Args::parse();
+
+    if !Path::new(&args.source_dir).exists() {
+        return Err(format!("source dir : '{}' does not exists", &args.source_dir).into());
+    }
+    if !Path::new(&args.target_dir).exists() {
+        return Err(format!("target dir : '{}' does not exists", &args.source_dir).into());
+    }
 
     print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
 
-    let files_list = get_filespath_list_simple(&args.source_dir);
+    let files_list = get_filepath_list_simple(&args.source_dir);
     let files_number = files_list.len();
 
     let pb = Arc::new(Mutex::new(ProgressBar::new(files_number as u64)));
@@ -60,9 +91,8 @@ async fn get_all() -> Result<()> {
 
     futures::future::join_all(files_read).await;
     pb.clone().lock().await.finish_and_clear();
-    println!("Ready - Waiting for changes on {}", &args.source_dir);
 
-    async_watch(&args.source_dir).await?;
+    async_watch(&args.source_dir, &args.target_dir, files_store).await?;
 
     Ok(())
 }
@@ -80,7 +110,7 @@ async fn read_file(
     Ok(())
 }
 
-fn get_filespath_list_simple(root_dir_path: &str) -> Vec<PathBuf> {
+fn get_filepath_list_simple(root_dir_path: &str) -> Vec<PathBuf> {
     let mut files_list = Vec::new();
     let mut files_found = 0usize;
 
@@ -117,19 +147,73 @@ fn async_watcher() -> notify::Result<(RecommendedWatcher, Receiver<notify::Resul
     Ok((watcher, rx))
 }
 
-async fn async_watch<P: AsRef<Path>>(path: P) -> notify::Result<()> {
+async fn async_watch(
+    source_dir: &str,
+    target_dir: &str,
+    files_store: HashMap<PathBuf, Vec<u8>>,
+) -> notify::Result<()> {
     let (mut watcher, mut rx) = async_watcher()?;
 
     // Add a path to be watched. All files and directories at that path and
     // below will be monitored for changes.
-    watcher.watch(path.as_ref(), RecursiveMode::Recursive)?;
+    watcher.watch(source_dir.as_ref(), RecursiveMode::Recursive)?;
+    println!("Ready - Waiting for changes on {}", source_dir);
 
+    let files_store_arc = Arc::new(RwLock::with_max_readers(files_store, MAX_RWLOCK_READERS));
     while let Some(res) = rx.next().await {
         match res {
-            Ok(event) => println!("changed: {:?}", event),
-            Err(e) => println!("watch error: {:?}", e),
+            Ok(event) => {
+                let file_store_clone = files_store_arc.clone();
+                let test = move || async {
+                    change_event_actions(event, file_store_clone, source_dir, target_dir).await;
+                };
+                test().await;
+            }
+            Err(e) => error!("watch error: {:?}", e),
         }
     }
 
     Ok(())
+}
+
+async fn change_event_actions(
+    event: Event,
+    file_store_clone: ConcurrentFileStore,
+    source_dir: &str,
+    target_dir: &str,
+) {
+    let file_ops_manager = FileOperationsManager::new(
+        file_store_clone,
+        source_dir.to_string(),
+        target_dir.to_string(),
+    );
+
+    match event.kind {
+        EventKind::Create(_) => {
+            let _ = file_ops_manager.copy(event).await;
+        }
+        EventKind::Modify(kind) => match kind {
+            ModifyKind::Name(rename) => match rename {
+                RenameMode::From => {
+                    let _ = file_ops_manager.remove(event).await;
+                }
+                RenameMode::To => {
+                    let _ = file_ops_manager.copy(event).await;
+                }
+                _ => {
+                    let _ = file_ops_manager.copy(event).await;
+                }
+            },
+            _ => {
+                let _ = file_ops_manager.copy(event).await;
+            }
+        },
+        EventKind::Remove(_) => {
+            let _ = file_ops_manager.remove(event).await;
+        }
+        EventKind::Access(_) => {}
+        _ => {
+            warn!("Unknown action")
+        }
+    }
 }

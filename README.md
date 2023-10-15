@@ -29,8 +29,8 @@ As this is an ongoing project, **DO NOT USE FOR A PRODUCTION SETUP**.
 git clone https://github.com/JulesTanguy/oxsync.git
 cd oxsync
 
-# Compiling, once this command complete, 
-# the binary files will be available in the 'target/release' directory.
+# Compiling, once this command is completed, 
+# the binaries will be available in the 'target/release' directory.
 cargo build --release
 ```
 
