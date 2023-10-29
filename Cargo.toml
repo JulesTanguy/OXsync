@@ -9,14 +9,14 @@ repository = "https://github.com/JulesTanguy/oxsync/"
 
 [dependencies]
 anyhow = "1.0.75"
-clap = { version = "4.4.6", features = ["derive"] }
-futures = "0.3.28"
+clap = { version = "4.4.7", features = ["derive"] }
+futures = "0.3.29"
 indicatif = "0.17.7"
 notify = "6.1.1"
 time = "0.3.30"
 time-macros = { version = "0.2.15", features = ["formatting"] }
 tokio = { version = "1.33.0", features = ["full"] }
-tracing = "0.1.39"
+tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.17", features = ["time", "local-time", "env-filter", "ansi"] }
 walkdir = "2.4.0"
 

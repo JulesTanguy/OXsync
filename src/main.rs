@@ -17,11 +17,12 @@ use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use notify::event::{ModifyKind, RenameMode};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use time_macros::format_description;
+use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{error, warn};
-use tracing_subscriber::EnvFilter;
+use tracing::{error, trace, warn};
 use tracing_subscriber::fmt::time;
+use tracing_subscriber::EnvFilter;
 
 /// Simple program to sync changes from one dir to an other
 #[derive(Parser, Debug)]
@@ -33,28 +34,51 @@ struct Args {
     /// path of the directory to write changes to
     #[arg(short, long, required(true))]
     target_dir: String,
+    /// do not display diff when a text file is modified
+    #[arg(long)]
+    no_diffs: bool,
+    /// display progress when loading files
+    #[arg(long)]
+    progress: bool,
 }
 
+#[derive(Debug, PartialEq)]
 enum EntryType {
-    FILE,
-    DIR
+    File,
+    Dir,
 }
+
 struct PathEntry {
-    path: PathBuf,
     entry_type: EntryType,
-    content: Option<Vec<u8>>
+    path: PathBuf,
+    content: Option<Vec<u8>>,
+}
+
+impl From<PathEntry> for PathEntryValues {
+    fn from(pe: PathEntry) -> Self {
+        PathEntryValues {
+            entry_type: pe.entry_type,
+            content: pe.content,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct PathEntryValues {
+    entry_type: EntryType,
+    content: Option<Vec<u8>>,
 }
 
 type BoxedError = Box<dyn Error + Send + Sync>;
-pub type ConcurrentFileStore = Arc<RwLock<HashMap<PathBuf, Vec<u8>>>>;
+pub type ConcurrentFileStore = Arc<RwLock<HashMap<PathBuf, PathEntryValues>>>;
 const MAX_RWLOCK_READERS: u32 = 2048;
 
 #[tokio::main]
 async fn main() -> Result<(), BoxedError> {
     tracing_subscriber::fmt()
-        /*.with_timer(time::LocalTime::new(format_description!(
+        .with_timer(time::LocalTime::new(format_description!(
             "[hour]:[minute]:[second].[subsecond digits:3]"
-        )))*/
+        )))
         .with_ansi(false)
         .with_env_filter(EnvFilter::from_env("OXSYNC_LOG"))
         .with_target(false)
@@ -76,13 +100,41 @@ async fn get_all() -> Result<(), BoxedError> {
         return Err(format!("target dir : '{}' does not exists", &args.source_dir).into());
     }
 
-//    print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
-
-    let path_list = get_path_list_simple(&args.source_dir);
-    println!("{:?}", path_list);
-    return Ok(());
+    let path_list = get_path_list(&args.source_dir);
     let files_number = path_list.len();
 
+    let mut files_store = HashMap::with_capacity(files_number);
+
+    for pe in path_list {
+        files_store.insert(pe.path.clone(), pe.into());
+    }
+
+    if args.progress {
+        let pb = init_progress_bar(files_number).await;
+
+        let files_read = files_store
+            .iter_mut()
+            .map(|file_store_row| async { read_filepath(file_store_row, Some(pb.clone())).await });
+
+        futures::future::join_all(files_read).await;
+
+        pb.lock().await.finish_and_clear();
+    } else {
+        let files_read = files_store
+            .iter_mut()
+            .map(|file_store_row| async { read_filepath(file_store_row, None).await });
+
+        futures::future::join_all(files_read).await;
+    }
+
+    println!("{:?}", files_store);
+
+    async_watch(&args.source_dir, &args.target_dir, files_store).await?;
+
+    Ok(())
+}
+
+async fn init_progress_bar(files_number: usize) -> Arc<Mutex<ProgressBar>> {
     let pb = Arc::new(Mutex::new(ProgressBar::new(files_number as u64)));
     pb.clone().lock().await.set_style(
         ProgressStyle::with_template(
@@ -94,50 +146,62 @@ async fn get_all() -> Result<(), BoxedError> {
         })
         .progress_chars("#>-"),
     );
+    pb
+}
 
-    let mut files_store = HashMap::with_capacity(files_number);
-    for path in path_list {
-        files_store.insert(path, Vec::new());
+async fn read_filepath(
+    file_store_row: (&PathBuf, &mut PathEntryValues),
+    pb: Option<Arc<Mutex<ProgressBar>>>,
+) -> Result<()> {
+    if file_store_row.1.entry_type == EntryType::Dir {
+        return Ok(());
     }
 
-    let files_read = files_store
-        .iter_mut()
-        .map(|file_store| async { read_file(file_store, pb.clone()).await });
-
-    futures::future::join_all(files_read).await;
-    pb.clone().lock().await.finish_and_clear();
-
-    async_watch(&args.source_dir, &args.target_dir, files_store).await?;
-
-    Ok(())
-}
-
-async fn read_file(
-    file_store: (&PathBuf, &mut Vec<u8>),
-    pb: Arc<Mutex<ProgressBar>>,
-) -> Result<()> {
-    let mut file = tokio::fs::OpenOptions::new()
+    let mut file = fs::OpenOptions::new()
         .read(true)
-        .open(file_store.0)
+        .open(file_store_row.0)
         .await?;
-    file.read_to_end(file_store.1).await?;
-//    pb.lock().await.inc(1);
+
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).await?;
+    file_store_row.1.content.replace(buffer);
+
+    trace!(
+        "path: {:?}, content: {:?}",
+        file_store_row.0,
+        file_store_row.1
+    );
+
+    if let Some(pb) = pb {
+        pb.lock().await.inc(1);
+    }
     Ok(())
 }
 
-fn get_path_list_simple(root_dir_path: &str) -> Vec<PathBuf> {
+fn get_path_list(root_dir_path: &str) -> Vec<PathEntry> {
     let mut path_list = Vec::new();
-    let mut files_found = 0usize;
 
     for entry in walkdir::WalkDir::new(root_dir_path)
         .into_iter()
         .filter_map(|e| e.ok())
     {
+        let pe;
         if entry.path().is_file() {
-            files_found += 1;
-            //print!("\rFiles found : {}", files_found)
+            pe = PathEntry {
+                entry_type: EntryType::File,
+                path: entry.into_path(),
+                content: None,
+            };
+        } else if entry.path().is_dir() {
+            pe = PathEntry {
+                entry_type: EntryType::Dir,
+                path: entry.into_path(),
+                content: None,
+            };
+        } else {
+            continue;
         }
-        path_list.push(entry.into_path());
+        path_list.push(pe);
     }
 
     print!("\r\n");
@@ -165,7 +229,7 @@ fn async_watcher() -> notify::Result<(RecommendedWatcher, Receiver<notify::Resul
 async fn async_watch(
     source_dir: &str,
     target_dir: &str,
-    files_store: HashMap<PathBuf, Vec<u8>>,
+    files_store: HashMap<PathBuf, PathEntryValues>,
 ) -> notify::Result<()> {
     let (mut watcher, mut rx) = async_watcher()?;
 
@@ -178,11 +242,12 @@ async fn async_watch(
     while let Some(res) = rx.next().await {
         match res {
             Ok(event) => {
+                trace!("{:?}", event);
                 let file_store_clone = files_store_arc.clone();
-                let test = move || async {
-                    change_event_actions(event, file_store_clone, source_dir, target_dir).await;
+                let handle_event = move || async {
+                    event_handler(event, file_store_clone, source_dir, target_dir).await;
                 };
-                test().await;
+                handle_event().await;
             }
             Err(e) => error!("watch error: {:?}", e),
         }
@@ -191,9 +256,9 @@ async fn async_watch(
     Ok(())
 }
 
-async fn change_event_actions(
+async fn event_handler(
     event: Event,
-    file_store_clone: ConcurrentFileStore,
+    file_store_clone: Arc<RwLock<HashMap<PathBuf, PathEntryValues>>>,
     source_dir: &str,
     target_dir: &str,
 ) {
@@ -205,22 +270,23 @@ async fn change_event_actions(
 
     match event.kind {
         EventKind::Create(_) => {
-            let _ = file_ops_manager.copy(event).await;
+            let _ = file_ops_manager.copy_created(event).await;
         }
         EventKind::Modify(kind) => match kind {
+            // TODO: Improve rename handling
             ModifyKind::Name(rename) => match rename {
                 RenameMode::From => {
                     let _ = file_ops_manager.remove(event).await;
                 }
                 RenameMode::To => {
-                    let _ = file_ops_manager.copy(event).await;
+                    let _ = file_ops_manager.copy_created(event).await;
                 }
                 _ => {
-                    let _ = file_ops_manager.copy(event).await;
+                    let _ = file_ops_manager.copy_modified(event).await;
                 }
             },
             _ => {
-                let _ = file_ops_manager.copy(event).await;
+                let _ = file_ops_manager.copy_modified(event).await;
             }
         },
         EventKind::Remove(_) => {

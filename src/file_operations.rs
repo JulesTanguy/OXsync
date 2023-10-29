@@ -6,7 +6,6 @@ use tracing::{error, info};
 use crate::ConcurrentFileStore;
 
 pub(crate) struct FileOperationsManager {
-    #[allow(dead_code)]
     file_store: ConcurrentFileStore,
     source_dir: String,
     target_dir: String,
@@ -20,34 +19,84 @@ impl FileOperationsManager {
             target_dir,
         }
     }
+    pub async fn copy_created(&self, event: Event) {
+        self.copy(event).await;
+    }
+    pub async fn copy_modified(&self, event: Event) {
+        self.copy(event).await;
+    }
 
-    pub async fn copy(&self, event: Event) {
-        for path in event.paths {
-            if self.is_dotgit(path.clone()) {
+    async fn copy(&self, event: Event) {
+        for src_path in event.paths {
+            if self.is_dotgit(src_path.clone()) {
                 continue;
             }
 
-            let (dest_path, dirs) = self.get_destination_path_and_dirs(&path);
+            let (dest_path, dirs) = self.get_destination_path_and_dirs(&src_path);
 
-            let path_str = path
+            let path_str = src_path
                 .strip_prefix(&self.source_dir)
                 .unwrap()
                 .to_str()
                 .unwrap();
 
-            if path.is_dir() {
-                let _: Result<(), _> = fs::create_dir_all(&dest_path).await;
-                info!("'{}' copied", path_str);
+            if src_path.is_dir() {
+                if !dest_path.exists() {
+                    let _: Result<(), _> = fs::create_dir_all(&dest_path).await;
+                    info!("dir '{}' copied", path_str);
+                }
                 continue;
             }
 
-            let _: Result<(), _> = fs::create_dir_all(&dirs).await;
-
-            if let Err(err) = fs::copy(&path, &dest_path).await {
-                error!("failed to copy '{}', error: {}", path_str, err.to_string());
+            if dest_path.is_dir() {
                 continue;
-            };
-            info!("'{}' copied", path_str)
+            }
+
+            if src_path.is_file() {
+                let file_store_reader = self.file_store.read().await;
+                let file_content_opt = file_store_reader.get(&*src_path);
+
+                if let Some(path_entry_values) = file_content_opt {
+                    if let Some(content) = &path_entry_values.content {
+                        if let Ok(current_content) = fs::read(&src_path).await {
+                            let owned_content: Vec<u8> =
+                                Vec::from_iter(content).into_iter().copied().collect();
+                            drop(file_store_reader);
+
+                            if owned_content == current_content {
+                                info!("File identical");
+                                continue;
+                            } else {
+                                let mut file_store_writer =
+                                    self.file_store.clone().write_owned().await;
+                                let stored_content =
+                                    &mut file_store_writer.get_mut(&src_path).unwrap().content;
+                                stored_content.replace(current_content.clone());
+                                drop(file_store_writer);
+
+                                let _: Result<(), _> = fs::create_dir_all(&dirs).await;
+                                if let Err(err) = fs::copy(&src_path, &dest_path).await {
+                                    error!(
+                                        "failed to copy '{}', error: {}",
+                                        path_str,
+                                        err.to_string()
+                                    );
+                                    continue;
+                                };
+                                info!("file '{}' copied", path_str);
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                let _: Result<(), _> = fs::create_dir_all(&dirs).await;
+                if let Err(err) = fs::copy(&src_path, &dest_path).await {
+                    error!("failed to copy '{}', error: {}", path_str, err.to_string());
+                    continue;
+                };
+                info!("file '{}' copied", path_str)
+            }
         }
     }
 
