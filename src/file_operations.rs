@@ -72,6 +72,7 @@ impl FileOperationsManager {
                         path_str,
                         err.to_string()
                     );
+                    return;
                 };
             } else if dest_path.is_dir() {
                 if let Err(err) = fs::remove_dir_all(dest_path).await {
@@ -80,9 +81,13 @@ impl FileOperationsManager {
                         path_str,
                         err.to_string()
                     );
+                    return;
                 };
+            } else if !dest_path.exists() {
+                return;
             } else {
                 error!("remove error: '{}' is not a file or a directory", path_str);
+                return;
             }
 
             info!("'{}' deleted", path_str)

@@ -17,7 +17,7 @@ time = "0.3.30"
 time-macros = { version = "0.2.15", features = ["formatting"] }
 tokio = { version = "1.33.0", features = ["full"] }
 tracing = "0.1.39"
-tracing-subscriber = { version = "0.3.17", features = ["time", "local-time"] }
+tracing-subscriber = { version = "0.3.17", features = ["time", "local-time", "env-filter", "ansi"] }
 walkdir = "2.4.0"
 
 [profile.release]

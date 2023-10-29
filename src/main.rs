@@ -20,6 +20,7 @@ use time_macros::format_description;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, warn};
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::time;
 
 /// Simple program to sync changes from one dir to an other
@@ -34,6 +35,16 @@ struct Args {
     target_dir: String,
 }
 
+enum EntryType {
+    FILE,
+    DIR
+}
+struct PathEntry {
+    path: PathBuf,
+    entry_type: EntryType,
+    content: Option<Vec<u8>>
+}
+
 type BoxedError = Box<dyn Error + Send + Sync>;
 pub type ConcurrentFileStore = Arc<RwLock<HashMap<PathBuf, Vec<u8>>>>;
 const MAX_RWLOCK_READERS: u32 = 2048;
@@ -41,9 +52,11 @@ const MAX_RWLOCK_READERS: u32 = 2048;
 #[tokio::main]
 async fn main() -> Result<(), BoxedError> {
     tracing_subscriber::fmt()
-        .with_timer(time::LocalTime::new(format_description!(
+        /*.with_timer(time::LocalTime::new(format_description!(
             "[hour]:[minute]:[second].[subsecond digits:3]"
-        )))
+        )))*/
+        .with_ansi(false)
+        .with_env_filter(EnvFilter::from_env("OXSYNC_LOG"))
         .with_target(false)
         .init();
 
@@ -63,10 +76,12 @@ async fn get_all() -> Result<(), BoxedError> {
         return Err(format!("target dir : '{}' does not exists", &args.source_dir).into());
     }
 
-    print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
+//    print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
 
-    let files_list = get_filepath_list_simple(&args.source_dir);
-    let files_number = files_list.len();
+    let path_list = get_path_list_simple(&args.source_dir);
+    println!("{:?}", path_list);
+    return Ok(());
+    let files_number = path_list.len();
 
     let pb = Arc::new(Mutex::new(ProgressBar::new(files_number as u64)));
     pb.clone().lock().await.set_style(
@@ -81,7 +96,7 @@ async fn get_all() -> Result<(), BoxedError> {
     );
 
     let mut files_store = HashMap::with_capacity(files_number);
-    for path in files_list {
+    for path in path_list {
         files_store.insert(path, Vec::new());
     }
 
@@ -106,12 +121,12 @@ async fn read_file(
         .open(file_store.0)
         .await?;
     file.read_to_end(file_store.1).await?;
-    pb.lock().await.inc(1);
+//    pb.lock().await.inc(1);
     Ok(())
 }
 
-fn get_filepath_list_simple(root_dir_path: &str) -> Vec<PathBuf> {
-    let mut files_list = Vec::new();
+fn get_path_list_simple(root_dir_path: &str) -> Vec<PathBuf> {
+    let mut path_list = Vec::new();
     let mut files_found = 0usize;
 
     for entry in walkdir::WalkDir::new(root_dir_path)
@@ -119,15 +134,15 @@ fn get_filepath_list_simple(root_dir_path: &str) -> Vec<PathBuf> {
         .filter_map(|e| e.ok())
     {
         if entry.path().is_file() {
-            files_list.push(entry.into_path());
             files_found += 1;
-            print!("\rFiles found : {}", files_found)
+            //print!("\rFiles found : {}", files_found)
         }
+        path_list.push(entry.into_path());
     }
 
     print!("\r\n");
 
-    files_list
+    path_list
 }
 
 fn async_watcher() -> notify::Result<(RecommendedWatcher, Receiver<notify::Result<Event>>)> {
@@ -213,7 +228,7 @@ async fn change_event_actions(
         }
         EventKind::Access(_) => {}
         _ => {
-            warn!("Unknown action")
+            warn!("Unknown event: {:?}", event)
         }
     }
 }
