@@ -1,5 +1,7 @@
-use notify::Event;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use notify::Event;
 use tokio::fs;
 use tracing::{error, info};
 
@@ -7,12 +9,16 @@ use crate::ConcurrentFileStore;
 
 pub(crate) struct FileOperationsManager {
     file_store: ConcurrentFileStore,
-    source_dir: String,
-    target_dir: String,
+    source_dir: Arc<String>,
+    target_dir: Arc<String>,
 }
 
 impl FileOperationsManager {
-    pub fn new(file_store: ConcurrentFileStore, source_dir: String, target_dir: String) -> Self {
+    pub fn new(
+        file_store: ConcurrentFileStore,
+        source_dir: Arc<String>,
+        target_dir: Arc<String>,
+    ) -> Self {
         FileOperationsManager {
             file_store,
             source_dir,
@@ -27,6 +33,7 @@ impl FileOperationsManager {
     }
 
     async fn copy(&self, event: Event) {
+        // "paths" length is always 1 on Windows
         for src_path in event.paths {
             if self.is_dotgit(src_path.clone()) {
                 continue;
@@ -35,7 +42,7 @@ impl FileOperationsManager {
             let (dest_path, dirs) = self.get_destination_path_and_dirs(&src_path);
 
             let path_str = src_path
-                .strip_prefix(&self.source_dir)
+                .strip_prefix(&*self.source_dir)
                 .unwrap()
                 .to_str()
                 .unwrap();
@@ -101,6 +108,7 @@ impl FileOperationsManager {
     }
 
     pub async fn remove(&self, event: Event) {
+        // "paths" length is always 1 on Windows
         for path in event.clone().paths {
             if self.is_dotgit(path.clone()) {
                 continue;
@@ -109,7 +117,7 @@ impl FileOperationsManager {
             let dest_path = self.get_destination_path(&path);
 
             let path_str = path
-                .strip_prefix(&self.source_dir)
+                .strip_prefix(&*self.source_dir)
                 .unwrap()
                 .to_str()
                 .unwrap();
@@ -151,14 +159,14 @@ impl FileOperationsManager {
     }
 
     fn get_destination_path(&self, path: &Path) -> PathBuf {
-        let path_stripped = path.strip_prefix(&self.source_dir).unwrap();
-        let dest_path = Path::new(&self.target_dir).join(path_stripped);
+        let path_stripped = path.strip_prefix(&*self.source_dir).unwrap();
+        let dest_path = Path::new(&*self.target_dir).join(path_stripped);
 
         dest_path
     }
 
     fn is_dotgit(&self, path: PathBuf) -> bool {
-        let path_stripped = path.strip_prefix(&self.source_dir).unwrap();
+        let path_stripped = path.strip_prefix(&*self.source_dir).unwrap();
         if path_stripped.starts_with(".git") {
             return true;
         }
