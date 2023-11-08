@@ -9,18 +9,17 @@ repository = "https://github.com/JulesTanguy/oxsync/"
 
 [dependencies]
 clap = { version = "4.4.7", features = ["derive"] }
-indicatif = "0.17.7"
 notify = "6.1.1"
 time = "0.3.30"
-time-macros = { version = "0.2.15", features = ["formatting"] } # TODO: remove ?
+time-macros = { version = "0.2.15", features = ["formatting"] }
 tokio = { version = "1.33.0", features = ["fs", "sync", "io-util", "rt-multi-thread", "macros"] }
-tracing = "0.1.40" # TODO: remove
-tracing-subscriber = { version = "0.3.17", features = ["time", "local-time", "env-filter", "ansi"] } # TODO: remove
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.17", features = ["time", "local-time", "ansi"] }
 walkdir = "2.4.0"
 
 [profile.release]
 panic = "abort" # Strip expensive panic clean-up logic
 codegen-units = 1 # Compile crates one after another so the compiler can optimize better
 lto = true # Enables link to optimizations
-opt-level = 3 # With all optimizations
+opt-level = 's' # With all optimizations
 strip = true # Remove debug symbols

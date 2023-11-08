@@ -1,44 +1,62 @@
 use std::collections::HashMap;
-use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use clap::Parser;
-use indicatif::{ProgressBar, ProgressState, ProgressStyle};
+use clap::{Parser, ValueEnum};
 use notify::event::{ModifyKind, RenameMode};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use time_macros::format_description;
-use tokio::fs;
-use tokio::io::AsyncReadExt;
+use tokio::fs::canonicalize;
 use tokio::sync::{
     mpsc::{channel, Receiver},
-    Mutex, RwLock,
+    OnceCell, RwLock,
 };
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::JoinHandle;
 use tracing::{error, trace, warn};
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::time;
-use tracing_subscriber::EnvFilter;
+use walkdir::WalkDir;
 
 use file_operations::FileOperationsManager;
 
 mod file_operations;
 
-/// Simple program to sync changes from one dir to an other
+/// Utility to sync changes from one dir to an other
 #[derive(Parser, Debug)]
 #[command(author, version, long_about = None)]
 struct Args {
-    /// path of the directory to watch changes from
-    #[arg(short, long, required(true))]
+    /// Path of the directory to watch changes from
+    #[arg(index(1), required(true))]
     source_dir: String,
-    /// path of the directory to write changes to
-    #[arg(short, long, required(true))]
+    /// Path of the directory to write changes to
+    #[arg(index(2), required(true))]
     target_dir: String,
-    /// do not display diff when a text file is modified
-    #[arg(long)]
-    no_diffs: bool,
-    /// display progress when loading files
-    #[arg(long)]
-    progress: bool,
+    /// Log level
+    #[arg(value_enum, long, default_value_t = LogLevel::Info)]
+    log_level: LogLevel,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+    Off,
+}
+
+impl From<LogLevel> for LevelFilter {
+    fn from(log_level: LogLevel) -> Self {
+        match log_level {
+            LogLevel::Error => LevelFilter::ERROR,
+            LogLevel::Warn => LevelFilter::WARN,
+            LogLevel::Info => LevelFilter::INFO,
+            LogLevel::Debug => LevelFilter::DEBUG,
+            LogLevel::Trace => LevelFilter::TRACE,
+            LogLevel::Off => LevelFilter::OFF,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -50,39 +68,45 @@ enum EntryType {
 struct PathEntry {
     entry_type: EntryType,
     path: PathBuf,
-    content: Option<Vec<u8>>,
 }
 
-impl From<PathEntry> for PathEntryValues {
+impl From<PathEntry> for PathEntryType {
     fn from(pe: PathEntry) -> Self {
-        PathEntryValues {
+        PathEntryType {
             entry_type: pe.entry_type,
-            content: pe.content,
         }
     }
 }
 
 #[derive(Debug)]
-pub struct PathEntryValues {
+pub struct PathEntryType {
     entry_type: EntryType,
-    content: Option<Vec<u8>>,
 }
 
-pub type ConcurrentFileStore = Arc<RwLock<HashMap<PathBuf, PathEntryValues>>>;
-const MAX_RWLOCK_READERS: u32 = 2048;
+#[derive(Debug)]
+struct Dirs {
+    source_dir: PathBuf,
+    target_dir: PathBuf,
+}
+
+pub type ConcurrentFileStore = Arc<RwLock<HashMap<PathBuf, PathEntryType>>>;
+pub type OngoingEventsLog = Arc<RwLock<HashMap<PathBuf, Arc<JoinHandle<()>>>>>;
+const MAX_RWLOCK_READERS: u32 = (u32::MAX >> 3) - 1;
+
+static SOURCE_AND_TARGET_DIR: OnceCell<Dirs> = OnceCell::const_new();
 
 #[tokio::main]
 async fn main() {
+    let args = Args::parse();
+
     tracing_subscriber::fmt()
         .with_timer(time::LocalTime::new(format_description!(
             "[hour]:[minute]:[second].[subsecond digits:3]"
         )))
         .with_ansi(false)
-        .with_env_filter(EnvFilter::from_env("OXSYNC_LOG"))
+        .with_max_level(args.log_level)
         .with_target(false)
         .init();
-
-    let args = Args::parse();
 
     let mut path_does_not_exists = false;
 
@@ -99,11 +123,18 @@ async fn main() {
         return;
     }
 
-    get_all(args).await;
-}
+    SOURCE_AND_TARGET_DIR
+        .set(Dirs {
+            source_dir: canonicalize(Path::new(&args.source_dir))
+                .await
+                .expect("Impossible to convert the <SOURCE_DIR> to a valid path"),
+            target_dir: canonicalize(Path::new(&args.target_dir))
+                .await
+                .expect("Impossible to convert the <TARGET_DIR> to a valid path"),
+        })
+        .unwrap();
 
-async fn get_all(args: Args) {
-    let path_list = get_path_list(&args.source_dir);
+    let path_list = get_path_list(&args.source_dir).await;
     let files_number = path_list.len();
 
     let mut files_store = HashMap::with_capacity(files_number);
@@ -112,85 +143,15 @@ async fn get_all(args: Args) {
         files_store.insert(pe.path.clone(), pe.into());
     }
 
-    let filled_file_store = if args.progress {
-        fill_files_store(files_store, Some(init_progress_bar(files_number).await)).await
-    } else {
-        fill_files_store(files_store, None).await
-    };
-
-    if let Err(e) = async_watch(&args.source_dir, &args.target_dir, filled_file_store).await {
+    if let Err(e) = init_event_loop(files_store).await {
         error!("{}", e);
     };
 }
 
-async fn fill_files_store(
-    files_store: HashMap<PathBuf, PathEntryValues>,
-    pb: Option<Arc<Mutex<ProgressBar>>>,
-) -> HashMap<PathBuf, PathEntryValues> {
-    let mut new_fs = HashMap::with_capacity(files_store.len());
-    let mut set = JoinSet::new();
-
-    files_store.into_iter().for_each(|file_store_row| {
-        let local_pb = pb.clone();
-        let _ = set.spawn(async { read_filepath(file_store_row, local_pb).await });
-    });
-
-    while let Some(Ok(Some(row))) = set.join_next().await {
-        new_fs.insert(row.0, row.1);
-    }
-    if let Some(local_pb) = pb {
-        local_pb.lock().await.finish_and_clear();
-    }
-
-    new_fs
-}
-
-async fn init_progress_bar(files_number: usize) -> Arc<Mutex<ProgressBar>> {
-    let pb = Arc::new(Mutex::new(ProgressBar::new(files_number as u64)));
-    pb.clone().lock().await.set_style(
-        ProgressStyle::with_template(
-            "Loading files [{wide_bar:.cyan/blue}] {percent}% ({elapsed})",
-        )
-        .unwrap()
-        .with_key("eta", |state: &ProgressState, w: &mut dyn Write| {
-            write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap()
-        })
-        .progress_chars("#>-"),
-    );
-    pb
-}
-
-async fn read_filepath(
-    mut file_store_row: (PathBuf, PathEntryValues),
-    pb: Option<Arc<Mutex<ProgressBar>>>,
-) -> Option<(PathBuf, PathEntryValues)> {
-    if file_store_row.1.entry_type == EntryType::Dir {
-        return Some(file_store_row);
-    }
-
-    if let Ok(mut file) = fs::OpenOptions::new()
-        .read(true)
-        .open(&file_store_row.0)
-        .await
-    {
-        let mut buffer = Vec::new();
-        let _ = file.read_to_end(&mut buffer).await;
-        file_store_row.1.content.replace(buffer);
-
-        if let Some(pb) = pb {
-            pb.lock().await.inc(1);
-        }
-
-        return Some(file_store_row);
-    };
-
-    None
-}
-
-fn get_path_list(root_dir_path: &str) -> Vec<PathEntry> {
+async fn get_path_list(root_dir_path: &str) -> Vec<PathEntry> {
     let mut path_list = Vec::new();
 
-    for entry in walkdir::WalkDir::new(root_dir_path)
+    for entry in WalkDir::new(root_dir_path)
         .into_iter()
         .filter_map(|e| e.ok())
     {
@@ -198,22 +159,22 @@ fn get_path_list(root_dir_path: &str) -> Vec<PathEntry> {
         if entry.path().is_file() {
             pe = PathEntry {
                 entry_type: EntryType::File,
-                path: entry.into_path(),
-                content: None,
+                path: canonicalize(entry.into_path())
+                    .await
+                    .expect("Impossible to convert to a valid path"),
             };
         } else if entry.path().is_dir() {
             pe = PathEntry {
                 entry_type: EntryType::Dir,
-                path: entry.into_path(),
-                content: None,
+                path: canonicalize(entry.into_path())
+                    .await
+                    .expect("Impossible to convert to a valid path"),
             };
         } else {
             continue;
         }
         path_list.push(pe);
     }
-
-    print!("\r\n");
 
     path_list
 }
@@ -229,40 +190,50 @@ fn async_watcher() -> notify::Result<(RecommendedWatcher, Receiver<notify::Resul
     Ok((watcher, rx))
 }
 
-async fn async_watch(
-    source_dir: &str,
-    target_dir: &str,
-    files_store: HashMap<PathBuf, PathEntryValues>,
-) -> notify::Result<()> {
+async fn init_event_loop(files_store: HashMap<PathBuf, PathEntryType>) -> notify::Result<()> {
     let (mut watcher, mut rx) = async_watcher()?;
 
     // Add a path to be watched. All files and directories at that path and
     // below will be monitored for changes.
-    watcher.watch(source_dir.as_ref(), RecursiveMode::Recursive)?;
+    watcher.watch(
+        &SOURCE_AND_TARGET_DIR.get().unwrap().source_dir,
+        RecursiveMode::Recursive,
+    )?;
+
     let files_store_arc = Arc::new(RwLock::with_max_readers(files_store, MAX_RWLOCK_READERS));
+    let ongoing_events = Arc::new(RwLock::with_max_readers(HashMap::new(), MAX_RWLOCK_READERS));
 
-    let src_dir_arc = Arc::new(source_dir.to_string());
-    let target_dir_arc = Arc::new(target_dir.to_string());
-    let mut handled_events = Vec::new();
+    if let Some(path_str) = SOURCE_AND_TARGET_DIR.get().unwrap().source_dir.to_str() {
+        // Check if the path starts with the prefix and remove the first three characters
+        if let Some(stripped) = path_str.strip_prefix(r"\\?\") {
+            println!("Ready - Waiting for changes on '{}'", stripped);
+        } else {
+            println!("Ready - Waiting for changes on '{}'", path_str);
+        };
+    } else {
+        panic!("Path contains invalid Unicode");
+    }
 
-    println!("Ready - Waiting for changes on '{}'", source_dir);
     while let Some(res) = rx.recv().await {
         match res {
             Ok(event) => {
                 trace!("{:?}", event);
 
-                // Cleanup past events
-                handled_events.retain(|join_handle: &JoinHandle<()>| !join_handle.is_finished());
-
                 let file_store = files_store_arc.clone();
-                let src_dir = src_dir_arc.clone();
-                let target_dir = target_dir_arc.clone();
+                let ongoing_events_clone = ongoing_events.clone();
 
-                let handle_event = move || async {
-                    event_handler(event, file_store, src_dir, target_dir).await;
-                };
+                // TODO: paths is cloned a lot
+                let paths = event.paths.clone();
 
-                handled_events.push(tokio::spawn(handle_event()));
+                let join_handle = Arc::new(tokio::spawn(handle_event(
+                    event,
+                    file_store,
+                    ongoing_events_clone,
+                )));
+                for path in paths {
+                    let local_join_handle = join_handle.clone();
+                    ongoing_events.write().await.insert(path, local_join_handle);
+                }
             }
             Err(e) => error!("watch error: {:?}", e),
         }
@@ -271,41 +242,46 @@ async fn async_watch(
     Ok(())
 }
 
-async fn event_handler(
+async fn handle_event(
     event: Event,
-    file_store_clone: Arc<RwLock<HashMap<PathBuf, PathEntryValues>>>,
-    source_dir: Arc<String>,
-    target_dir: Arc<String>,
+    file_store_clone: Arc<RwLock<HashMap<PathBuf, PathEntryType>>>,
+    ongoing_events: OngoingEventsLog,
 ) {
-    let file_ops_manager = FileOperationsManager::new(file_store_clone, source_dir, target_dir);
+    let file_ops_manager = FileOperationsManager::new(file_store_clone);
+
+    let paths = event.paths.clone();
 
     match event.kind {
         EventKind::Create(_) => {
-            let _ = file_ops_manager.copy_created(event).await;
+            //file_ops_manager.copy(event).await;
         }
         EventKind::Modify(kind) => match kind {
             // TODO: Improve rename handling
             ModifyKind::Name(rename) => match rename {
                 RenameMode::From => {
-                    let _ = file_ops_manager.remove(event).await;
+                    file_ops_manager.remove(event).await;
                 }
                 RenameMode::To => {
-                    let _ = file_ops_manager.copy_created(event).await;
+                    file_ops_manager.copy(event).await;
                 }
                 _ => {
-                    let _ = file_ops_manager.copy_modified(event).await;
+                    file_ops_manager.copy(event).await;
                 }
             },
             _ => {
-                let _ = file_ops_manager.copy_modified(event).await;
+                file_ops_manager.copy(event).await;
             }
         },
         EventKind::Remove(_) => {
-            let _ = file_ops_manager.remove(event).await;
+            file_ops_manager.remove(event).await;
         }
         EventKind::Access(_) => {}
         _ => {
             warn!("Unknown event: {:?}", event)
         }
+    }
+
+    for path in paths {
+        ongoing_events.write().await.remove(&path);
     }
 }
