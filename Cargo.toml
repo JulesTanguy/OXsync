@@ -8,11 +8,15 @@ description = "oxsync is a file synchronization tool with a focus on 'watch for 
 repository = "https://github.com/JulesTanguy/oxsync/"
 
 [dependencies]
+async-recursion = "1.0.5"
+blake3 = "1.5.0"
 clap = { version = "4.4.7", features = ["derive"] }
+glob = "0.3.1"
 notify = "6.1.1"
+regex = "1.10.2"
 time = "0.3.30"
 time-macros = { version = "0.2.15", features = ["formatting"] }
-tokio = { version = "1.33.0", features = ["fs", "sync", "io-util", "rt-multi-thread", "macros"] }
+tokio = { version = "1.33.0", features = ["fs", "sync", "io-util", "rt-multi-thread", "macros", "time"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.17", features = ["time", "local-time", "ansi"] }
 walkdir = "2.4.0"

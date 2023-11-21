@@ -1,77 +1,123 @@
-use std::io::Error;
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::SystemTime;
 
+use blake3::hash;
 use notify::Event;
 use tokio::fs;
+use tokio::sync::RwLock;
 use tracing::{error, info};
 
-use crate::{ConcurrentFileStore, EntryType, PathEntryType, SOURCE_AND_TARGET_DIR};
+use crate::utils::{PathType, Utils};
+use crate::PathMetadata;
 
 pub(crate) struct FileOperationsManager {
-    file_store: ConcurrentFileStore,
+    file_store: Arc<RwLock<HashMap<PathBuf, PathMetadata>>>,
 }
 
 impl FileOperationsManager {
-    pub fn new(file_store: ConcurrentFileStore) -> Self {
+    pub fn new(file_store: Arc<RwLock<HashMap<PathBuf, PathMetadata>>>) -> Self {
         FileOperationsManager { file_store }
     }
 
     pub async fn copy(&self, event: Event) {
         // "paths" length is always 1 on Windows
         for src_path in event.paths {
-            if is_dotgit(&src_path) {
+            let v_path = Utils::path_to_verbatim(&src_path);
+
+            if Utils::is_in_excluded_paths(&v_path, true).await {
                 continue;
             }
 
-            let path_str = src_path
-                .strip_prefix(&SOURCE_AND_TARGET_DIR.get().unwrap().source_dir)
+            if Utils::args().exclude_temporary_editor_files && v_path.ends_with("~") {
+                continue;
+            }
+
+            let path_str = v_path
+                .strip_prefix(&Utils::args().source_dir)
                 .unwrap()
                 .to_str()
                 .unwrap();
 
-            if path_str.ends_with('~') {
+            let relative_path = v_path.strip_prefix(&Utils::args().source_dir).unwrap();
+            let (dest_path, dirs) = Utils::get_destination_path_and_dirs(relative_path);
+
+            let file_store_reader = self.file_store.read().await;
+
+            if let Some(path_metadata) = file_store_reader.get(&v_path) {
+                let path_metadata_clone = path_metadata.clone();
+                drop(file_store_reader);
+
+                match path_metadata_clone.path_type {
+                    PathType::Dir => {
+                        if Utils::create_dirs(&dest_path, path_str).await.is_ok() {
+                            self.write_in_file_store(v_path, PathType::Dir).await;
+                        }
+                    }
+                    PathType::File => {
+                        let current_hash_opt = Utils::retry_read_file(&v_path, 3, 1000)
+                            .await
+                            .map(|file_content| hash(&file_content));
+
+                        if current_hash_opt.is_none() {
+                            // TODO : Check if exists before create
+                            let _: Result<(), _> = fs::create_dir_all(&dirs).await;
+
+                            if Utils::copy_file(&v_path, &dest_path, path_str)
+                                .await
+                                .is_ok()
+                            {
+                                self.write_in_file_store(v_path, PathType::File).await;
+                            }
+                            continue;
+                        }
+
+                        // TODO: Check Why it can panics ???
+                        if current_hash_opt.unwrap() == path_metadata_clone.hash.unwrap() {
+                            info!("file '{}' not copied : content is identical", path_str);
+                        } else {
+                            // TODO : Check if exists before create
+                            let _: Result<(), _> = fs::create_dir_all(&dirs).await;
+
+                            if Utils::copy_file(&v_path, &dest_path, path_str)
+                                .await
+                                .is_ok()
+                            {
+                                self.write_in_file_store(v_path, PathType::File).await;
+                            }
+                        }
+                    }
+                }
                 continue;
             }
 
-            let relative_path = src_path
-                .strip_prefix(&SOURCE_AND_TARGET_DIR.get().unwrap().source_dir)
-                .unwrap();
-            let (dest_path, dirs) = get_destination_path_and_dirs(relative_path);
+            drop(file_store_reader);
 
-            if let Some(path_entry_values) = self.file_store.read().await.get(&src_path) {
-                if path_entry_values.entry_type == EntryType::Dir {
-                    create_dirs(&dest_path, path_str).await;
-                }
-                if path_entry_values.entry_type == EntryType::File {
-                    copy_file(&src_path, &dest_path, path_str).await;
+            if v_path.is_file() {
+                if Utils::is_in_excluded_paths(&v_path, false).await {
+                    continue;
                 }
 
-                continue;
-            }
-
-            if src_path.is_dir() {
-                if !dest_path.exists() {
-                    create_dirs(&dest_path, path_str).await;
-                }
-                continue;
-            }
-
-            if dest_path.is_dir() {
-                continue;
-            }
-
-            if src_path.is_file() {
-                if self.file_store.read().await.get(&src_path).is_none() {
-                    self.file_store.clone().write().await.insert(
-                        src_path.clone(),
-                        PathEntryType {
-                            entry_type: EntryType::File,
-                        },
-                    );
-                }
-
+                // TODO : Check if exists before create
                 let _: Result<(), _> = fs::create_dir_all(&dirs).await;
-                copy_file(&src_path, &dest_path, path_str).await;
+
+                if Utils::copy_file(&v_path, &dest_path, path_str)
+                    .await
+                    .is_ok()
+                {
+                    self.write_in_file_store(v_path, PathType::File).await;
+                }
+                continue;
+            }
+
+
+            if v_path.is_dir()
+                && !dest_path.is_dir()
+                && !Utils::is_in_excluded_paths(&v_path, false).await
+                && Utils::create_dirs(&dest_path, path_str).await.is_ok()
+            {
+                self.write_in_file_store(v_path, PathType::Dir).await;
             }
         }
     }
@@ -79,103 +125,72 @@ impl FileOperationsManager {
     pub async fn remove(&self, event: Event) {
         // "paths" length is always 1 on Windows
         for src_path in event.paths {
-            if is_dotgit(&src_path) {
+            let v_path = Utils::path_to_verbatim(&src_path);
+
+            if Utils::is_in_excluded_paths(&v_path, true).await {
                 continue;
             }
 
-            let path_str = src_path
-                .strip_prefix(&SOURCE_AND_TARGET_DIR.get().unwrap().source_dir)
+            if Utils::args().exclude_temporary_editor_files && v_path.ends_with("~") {
+                continue;
+            }
+
+            let path_str = v_path
+                .strip_prefix(&Utils::args().source_dir)
                 .unwrap()
                 .to_str()
                 .unwrap();
 
-            if path_str.ends_with('~') {
-                continue;
-            }
-
-            let relative_path = src_path
-                .strip_prefix(&SOURCE_AND_TARGET_DIR.get().unwrap().source_dir)
-                .unwrap();
-            let dest_path = get_destination_path(relative_path);
+            let relative_path = v_path.strip_prefix(&Utils::args().source_dir).unwrap();
+            let dest_path = Utils::get_destination_path(relative_path);
 
             if !dest_path.exists() {
                 return;
             } else if dest_path.is_file() {
                 if let Err(err) = fs::remove_file(dest_path).await {
-                    self.handle_remove_err(err, path_str, EntryType::File);
+                    Utils::handle_remove_err(err, path_str, PathType::File);
                 } else {
                     info!("'{}' deleted", path_str);
                 };
-                self.file_store.write().await.remove(&src_path);
+                self.file_store.write().await.remove(&v_path);
             } else if dest_path.is_dir() {
                 if let Err(err) = fs::remove_dir_all(dest_path).await {
-                    self.handle_remove_err(err, path_str, EntryType::Dir);
+                    Utils::handle_remove_err(err, path_str, PathType::Dir);
                 } else {
                     info!("'{}' deleted", path_str);
                 };
-                self.file_store.write().await.remove(&src_path);
+                self.file_store.write().await.remove(&v_path);
             } else {
                 error!("remove error: '{}' is not a file or a directory", path_str);
             }
         }
     }
 
-    fn handle_remove_err(&self, err: Error, path_str: &str, entry_type: EntryType) {
-        let entry_type_str = match entry_type {
-            EntryType::File => "file",
-            EntryType::Dir => "dir",
-        };
-        if err.raw_os_error().is_some() {
-            let os_err = err.raw_os_error().unwrap();
-            if os_err == 2 || os_err == 3 {
-                error!(
-                    "failed to remove {} '{}', error: {}",
-                    entry_type_str,
-                    path_str,
-                    err.to_string()
-                );
-            };
-        } else {
-            error!(
-                "failed to remove {} '{}', error: {}",
-                entry_type_str,
-                path_str,
-                err.to_string()
+    async fn write_in_file_store(&self, path: PathBuf, path_type: PathType) {
+        let mut current_hash_opt = None;
+
+        if path_type == PathType::File {
+            current_hash_opt = Utils::retry_read_file(&path, 3, 1000)
+                .await
+                .map(|file_content| hash(&file_content));
+        }
+
+        if self.file_store.read().await.get(&path).is_none() {
+            self.file_store.write().await.insert(
+                path.clone(),
+                PathMetadata {
+                    path_type,
+                    hash: current_hash_opt,
+                    last_change: SystemTime::now(),
+                },
             );
+        } else {
+            let mut file_store_writer = self.file_store.write().await;
+            let path_metadata = file_store_writer.get_mut(&path).unwrap();
+            if path_type == PathType::File {
+                path_metadata.hash = current_hash_opt;
+            }
+            path_metadata.last_change = SystemTime::now();
         }
     }
-}
-
-async fn copy_file(src_path: &Path, dest_path: &Path, path_str: &str) {
-    if let Err(err) = fs::copy(src_path, dest_path).await {
-        error!("failed to copy '{}', error: {}", path_str, err.to_string());
-    } else {
-        info!("file '{}' copied", path_str)
-    };
-}
-
-async fn create_dirs(dest_path: &Path, path_str: &str) {
-    if let Err(err) = fs::create_dir_all(&dest_path).await {
-        error!("failed to copy '{}', error: {}", path_str, err.to_string());
-    } else {
-        info!("dir '{}' copied", path_str)
-    };
-}
-
-fn get_destination_path_and_dirs(relative_path: &Path) -> (PathBuf, PathBuf) {
-    let dest_path = get_destination_path(relative_path);
-    let dirs = dest_path.parent().unwrap().to_path_buf();
-
-    (dest_path, dirs)
-}
-
-fn get_destination_path(relative_path: &Path) -> PathBuf {
-    Path::new(&SOURCE_AND_TARGET_DIR.get().unwrap().target_dir).join(relative_path)
-}
-
-fn is_dotgit(path: &Path) -> bool {
-    let relative_path = path
-        .strip_prefix(&SOURCE_AND_TARGET_DIR.get().unwrap().source_dir)
-        .unwrap();
-    relative_path.starts_with(".git")
 }
