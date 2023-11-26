@@ -1,41 +1,43 @@
-# oxsync - a file synchronization tool in Rust
+# oxsync
+Sync changes from a directory to another
 
-This project is shaping up to redefine file synchronization using Rust, primarily designed with a strong focus on the "watch for changes" feature.
+```
+Usage: oxsync.exe [OPTIONS] <SOURCE_DIR> <TARGET_DIR>
+
+Arguments:
+  <SOURCE_DIR>  Path of the directory to watch changes from
+  <TARGET_DIR>  Path of the directory to write changes to
+
+Options:
+  -e, --exclude <EXCLUDE>               Exclude file or dir from the <SOURCE_DIR>
+      --exclude-temporary-editor-files  Exclude filenames ending with a tilde `~` [aliases: exclude-tmp]
+      --ide-mode                        Exclude `.git` and `.idea` dirs + enable the `exclude-temporary-editor-files` option [aliases: ide]
+      --statistics                      Get how much time is needed to copy a file [aliases: stats]
+      --trace                           Set the log level to trace
+  -h, --help                            Print help
+  -V, --version                         Print version
+```
 
 ## Purpose
+oxsync is geared towards enabling fast, local reads with a remote filesystem.
+The conventional setup advices to initiate with a copy of local files and directories on the remote machine,
+while the tool monitors and synchronizes the modifications performed when the program is running.
 
-oxsync is geared towards enabling fast, local reads with a remote filesystem. The conventional setup advices to initiate with a copy of remote files and directories on one's local machine, while the tool monitors and synchronizes only the modifications performed when the program is running. Please note that this tool is not designed to capture changes implemented from other sources or means, as any updates from other means may lead to overwriting during the next local change. It's essential to note that oxsync is not intended to serve as a Version Control System (VCS).
-
-## Key Features (Planned)
-
-- Real-time "watch for changes" functionality for immediate synchronization.
+## Features
+- Real-time "watch for changes" functionality for near immediate synchronization.
 - CLI interface with intuitive commands.
-- Local mirroring of remote file system for quick reads.
-- An optional, initial copy builtin into the tool
-- Display diffs on each change
-- Good handling of big and small files
-- An "exclude" argument with glob pattern support
-- Tested and fully functional on Linux, macOS and Windows
+- Local copy of remote directories for quick reads.
+- Handle big and small files
+- An "exclude" argument
+- Tested and fully functional on Windows
 
 ## Installation
-
-As this is an ongoing project, **DO NOT USE FOR A PRODUCTION SETUP**.
-
 ```sh
 # Beforehand make sure to have a functional Rust compiler and 
 # the Cargo package manager installed
-
-# Cloning the repo and change the working directory
-git clone https://github.com/JulesTanguy/oxsync.git
-cd oxsync
-
-# Compiling, once this command is completed, 
-# the binaries will be available in the 'target/release' directory.
-cargo build --release
+cargo install oxsync
 ```
 
 ## Acknowledgements
-
-This project would not have been possible without the incredible work of the open-source community. I would like to express our sincere gratitude towards the developers of the amazing libraries that have been essential in the construction of oxsync. Their impressive and generous contributions to the open-source ecosystem have didn't just make this project feasible, but also nurtured a platform for developers to learn, build, and grow.
-
-Feel free to look at the `Cargo.toml` file at the root of the repository. It provides a comprehensive list of all the libraries that play a crucial part in the development of this project.
+As always, feel free to look at the `dependencies` of the `Cargo.toml` file at the root of the repository. It provides a comprehensive list 
+of all the libraries that play a crucial part in the development of this project.
