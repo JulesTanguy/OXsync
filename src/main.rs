@@ -1,7 +1,10 @@
-use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
+use ahash::AHasher;
 use clap::Parser;
+use lru::LruCache;
 use notify::{RecursiveMode, Watcher};
 use tokio::sync::OnceCell;
 use tokio::time::Instant;
@@ -63,7 +66,12 @@ async fn init_event_loop() -> notify::Result<()> {
     // below will be monitored for changes.
     watcher.watch(&Utils::args().source_dir, RecursiveMode::Recursive)?;
 
-    let mut file_store = HashMap::new();
+    let mut file_store: LruCache<PathBuf, PathMetadata> = LruCache::with_hasher(
+        NonZeroUsize::new(32_768).unwrap(),
+        BuildHasherDefault::<AHasher>::default(),
+    );
+
+    let mut rename_from: Option<PathBuf> = None;
 
     info!(
         "Ready - Waiting for changes on '{}'",
@@ -75,7 +83,7 @@ async fn init_event_loop() -> notify::Result<()> {
                 let emit_time = Instant::now();
                 trace!("{:?}", event);
 
-                Utils::handle_event(event, &mut file_store, emit_time).await
+                Utils::handle_event(event, &mut file_store, emit_time, &mut rename_from).await
             }
             Err(e) => err!("watch error: {:?}", e),
         }

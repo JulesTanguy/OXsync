@@ -1,18 +1,18 @@
 use core::fmt::Debug;
-use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::abort;
 use std::time::SystemTime;
 
 use blake3::Hash;
-use notify::event::{ModifyKind, RenameMode};
+use lru::LruCache;
 use notify::{Event, EventKind};
+use notify::event::{ModifyKind, RenameMode};
 use tokio::fs;
 use tokio::sync::OnceCell;
 use tokio::time::Instant;
 
+use crate::{Args, err, info, warn};
 use crate::file_operations::FileOperationsManager;
-use crate::{err, info, warn, Args};
 
 pub struct Utils;
 
@@ -90,23 +90,17 @@ impl Utils {
             err!("failed to copy '{}', error: {}", path_str, err.to_string());
             Err(())
         } else {
-            if Utils::args().statistics {
-                let elapsed = emit_time.elapsed().as_micros();
-                if elapsed >= 1000 {
-                    info!("file '{}' copied in {} ms", path_str, elapsed / 1000);
-                } else {
-                    info!("file '{}' copied in {} μs", path_str, elapsed);
-                }
-
-                return Ok(());
-            }
-
-            info!("file '{}' copied", path_str);
+            Self::print_action("copied", "file", path_str, &emit_time);
             Ok(())
         }
     }
 
-    pub async fn create_dirs(dest_path: &Path, path_str: &str, dependency: bool) -> Result<(), ()> {
+    pub async fn create_dirs(
+        dest_path: &Path,
+        path_str: &str,
+        emit_time: &Instant,
+        dependency: bool,
+    ) -> Result<(), ()> {
         if let Err(err) = fs::create_dir_all(&dest_path).await {
             if dependency {
                 err!(
@@ -121,7 +115,7 @@ impl Utils {
             Err(())
         } else {
             if !dependency {
-                info!("dir '{}' created", path_str);
+                Self::print_action("created", "dir", path_str, emit_time);
             }
             Ok(())
         }
@@ -140,22 +134,23 @@ impl Utils {
 
     pub async fn handle_event(
         event: Event,
-        file_store: &mut HashMap<PathBuf, PathMetadata>,
+        file_store: &mut LruCache<PathBuf, PathMetadata>,
         emit_time: Instant,
+        rename_from: &mut Option<PathBuf>,
     ) {
         match event.kind {
             EventKind::Create(_) => {
-                // TODO: Improve create handling
-                FileOperationsManager::copy(file_store, emit_time, event).await;
+                FileOperationsManager::create(file_store, emit_time, event).await;
             }
             EventKind::Modify(kind) => match kind {
-                // TODO: Improve rename handling
                 ModifyKind::Name(rename) => match rename {
                     RenameMode::From => {
-                        FileOperationsManager::remove(file_store, event).await;
+                        FileOperationsManager::rename(file_store, emit_time, event, rename_from)
+                            .await;
                     }
                     RenameMode::To => {
-                        FileOperationsManager::copy(file_store, emit_time, event).await;
+                        FileOperationsManager::rename(file_store, emit_time, event, rename_from)
+                            .await;
                     }
                     _ => {
                         FileOperationsManager::copy(file_store, emit_time, event).await;
@@ -166,12 +161,36 @@ impl Utils {
                 }
             },
             EventKind::Remove(_) => {
-                FileOperationsManager::remove(file_store, event).await;
+                FileOperationsManager::remove(file_store, emit_time, event).await;
             }
             EventKind::Access(_) => {}
             _ => {
                 warn!("Unknown event: {:?}", event)
             }
         }
+    }
+
+    pub fn print_action(action_verb: &str, type_path: &str, path_str: &str, emit_time: &Instant) {
+        if Utils::args().statistics {
+            let elapsed = emit_time.elapsed().as_micros();
+            if elapsed >= 1000 {
+                info!(
+                    "{} '{}' {} in {} ms",
+                    type_path,
+                    path_str,
+                    action_verb,
+                    elapsed / 1000
+                );
+            } else {
+                info!(
+                    "{} '{}' {} in {} μs",
+                    type_path, path_str, action_verb, elapsed
+                );
+            }
+
+            return;
+        }
+
+        info!("{} '{}' {}", type_path, path_str, action_verb);
     }
 }

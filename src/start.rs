@@ -7,8 +7,8 @@ use tokio::fs::canonicalize;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::utils::Utils;
 use crate::{Args, LOG_TRACE};
+use crate::utils::Utils;
 
 pub(crate) struct Start;
 
@@ -60,7 +60,7 @@ impl Start {
             let full_path = if !path.starts_with(&args.source_dir) {
                 args.source_dir.as_path().join(path)
             } else {
-                path.clone()
+                path.to_path_buf()
             };
 
             excluded_paths.push(Utils::path_to_verbatim(&full_path));

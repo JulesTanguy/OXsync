@@ -24,7 +24,7 @@ macro_rules! info {
 macro_rules! err {
     ($($arg:tt)*) => {{
         let timestamp = $crate::get_timestamp!();
-        println!("{} ERROR {}", timestamp, format_args!($($arg)*));
+        eprintln!("{} ERROR {}", timestamp, format_args!($($arg)*));
     }};
 }
 
@@ -32,7 +32,7 @@ macro_rules! err {
 macro_rules! warn {
     ($($arg:tt)*) => {{
         let timestamp = $crate::get_timestamp!();
-        println!("{} WARN {}", timestamp, format_args!($($arg)*));
+        eprintln!("{} WARN {}", timestamp, format_args!($($arg)*));
     }};
 }
 
