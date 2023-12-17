@@ -14,5 +14,8 @@ jobs:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v3
-    - name: Build
+    - name: Build release
       run: cargo build -r --verbose
+    - uses: actions/upload-artifact@v4
+      with:
+        path: target/release/oxsync.exe

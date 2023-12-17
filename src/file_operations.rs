@@ -55,10 +55,11 @@ impl FileOperationsManager {
                         }
                     }
                     PathType::File => {
-                        let mut current_hash = None;
-                        if let Ok(file_content) = fs::read(&v_path).await {
-                            current_hash = Some(hash(&file_content));
-                        }
+                        let current_hash = if let Ok(file_content) = fs::read(&v_path).await {
+                            Some(hash(&file_content))
+                        } else {
+                            None
+                        };
 
                         if current_hash.is_none() {
                             Self::create_depends_dirs(dirs, path_str, file_store, &emit_time).await;
@@ -111,7 +112,14 @@ impl FileOperationsManager {
                     .await
                     .is_ok()
                 {
-                    Self::write_in_file_store(file_store, v_path, PathType::File, None).await;
+                    let current_hash = if let Ok(file_content) = fs::read(&v_path).await {
+                        Some(hash(&file_content))
+                    } else {
+                        None
+                    };
+
+                    Self::write_in_file_store(file_store, v_path, PathType::File, current_hash)
+                        .await;
                 }
                 continue;
             }
@@ -206,27 +214,37 @@ impl FileOperationsManager {
                     *rename_from = Some(dest_path);
                 }
                 Modify(ModifyKind::Name(RenameMode::To)) => {
-                    if rename_from.is_some()
-                        && fs::rename(rename_from.take().unwrap(), dest_path)
-                            .await
-                            .is_ok()
-                    {
-                        let path_type;
-                        let path_type_str;
-                        if v_path.is_file() {
-                            path_type = PathType::File;
-                            path_type_str = "file";
-                        } else if v_path.is_dir() {
-                            path_type = PathType::Dir;
-                            path_type_str = "dir";
-                        } else {
-                            err!("'{}' is not a file or a directory", path_str);
-                            return;
-                        };
+                    if rename_from.is_some() {
+                        let old_path = rename_from.take().unwrap();
 
-                        Utils::print_action("renamed", path_type_str, path_str, &emit_time);
-                        *rename_from = None;
-                        Self::write_in_file_store(file_store, v_path, path_type, None).await;
+                        if fs::rename(&old_path, dest_path).await.is_ok() {
+                            let path_type;
+                            let path_type_str;
+                            if v_path.is_file() {
+                                path_type = PathType::File;
+                                path_type_str = "file";
+                            } else if v_path.is_dir() {
+                                path_type = PathType::Dir;
+                                path_type_str = "dir";
+                            } else {
+                                err!("'{}' is not a file or a directory", path_str);
+                                return;
+                            };
+
+                            Utils::print_action("renamed", path_type_str, path_str, &emit_time);
+
+                            if let Some(mut metadata) = file_store.pop(&old_path) {
+                                metadata.last_change = SystemTime::now();
+                                file_store.put(v_path, metadata);
+                            } else {
+                                let metadata = PathMetadata {
+                                    path_type,
+                                    hash: None,
+                                    last_change: SystemTime::now(),
+                                };
+                                file_store.put(v_path, metadata);
+                            }
+                        }
                     }
                 }
                 _ => {}
