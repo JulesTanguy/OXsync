@@ -10,8 +10,8 @@ use tokio::fs;
 use tokio::fs::File;
 use tokio::time::Instant;
 
-use crate::{err, info, PathMetadata};
 use crate::utils::{PathType, Utils};
+use crate::{err, info, PathMetadata};
 
 pub(crate) struct FileOperationsManager;
 
@@ -35,7 +35,7 @@ impl FileOperationsManager {
                 .to_str()
                 .unwrap();
 
-            if Utils::args().exclude_temporary_editor_files && path_str.ends_with('~') {
+            if Utils::args().no_temporary_editor_files && path_str.ends_with('~') {
                 continue;
             }
 
@@ -153,7 +153,7 @@ impl FileOperationsManager {
                 .to_str()
                 .unwrap();
 
-            if Utils::args().exclude_temporary_editor_files && path_str.ends_with('~') {
+            if Utils::args().no_temporary_editor_files && path_str.ends_with('~') {
                 continue;
             }
 
@@ -202,7 +202,7 @@ impl FileOperationsManager {
                 .to_str()
                 .unwrap();
 
-            if Utils::args().exclude_temporary_editor_files && path_str.ends_with('~') {
+            if Utils::args().no_temporary_editor_files && path_str.ends_with('~') {
                 continue;
             }
 
@@ -270,7 +270,7 @@ impl FileOperationsManager {
                 .to_str()
                 .unwrap();
 
-            if Utils::args().exclude_temporary_editor_files && path_str.ends_with('~') {
+            if Utils::args().no_temporary_editor_files && path_str.ends_with('~') {
                 continue;
             }
 

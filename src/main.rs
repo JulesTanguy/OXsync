@@ -29,16 +29,19 @@ pub struct Args {
     /// Path of the directory to write changes to
     #[arg(index(2), required(true))]
     target_dir: PathBuf,
-    /// Exclude file or dir from the <SOURCE_DIR>
+    /// Exclude file or dir from the <SOURCE_DIR>, can be used multiple times
     #[arg(long, short)]
     exclude: Vec<PathBuf>,
-    /// Exclude filenames ending with a tilde `~`
-    #[arg(long, visible_alias("exclude-tmp"))]
-    exclude_temporary_editor_files: bool,
-    /// Exclude `.git` and `.idea` dirs + enable the `exclude-temporary-editor-files` option
+    /// Exclude files with names ending by a tilde `~`
+    #[arg(long, visible_alias("no-tmp"))]
+    no_temporary_editor_files: bool,
+    /// Ignore creation events
+    #[arg(long, visible_alias("no-create"))]
+    no_creation_events: bool,
+    /// Exclude `.git`, `.idea` dirs + enables `no-temporary-editor-files`, `no-creation-events` options
     #[arg(long, visible_alias("ide"))]
     ide_mode: bool,
-    /// Get how much time is needed to copy a file
+    /// Display the time spent copying the file
     #[arg(long, visible_alias("stats"))]
     statistics: bool,
     /// Set the log level to trace

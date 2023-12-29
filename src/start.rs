@@ -7,8 +7,8 @@ use tokio::fs::canonicalize;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::{Args, LOG_TRACE};
 use crate::utils::Utils;
+use crate::{Args, LOG_TRACE};
 
 pub(crate) struct Start;
 
@@ -69,7 +69,8 @@ impl Start {
         if args.ide_mode {
             excluded_paths.push(Utils::path_to_verbatim(&args.source_dir.join(".idea")));
             excluded_paths.push(Utils::path_to_verbatim(&args.source_dir.join(".git")));
-            args.exclude_temporary_editor_files = true;
+            args.no_temporary_editor_files = true;
+            args.no_creation_events = true;
         }
 
         excluded_paths.shrink_to_fit();

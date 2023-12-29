@@ -5,14 +5,14 @@ use std::time::SystemTime;
 
 use blake3::Hash;
 use lru::LruCache;
-use notify::{Event, EventKind};
 use notify::event::{ModifyKind, RenameMode};
+use notify::{Event, EventKind};
 use tokio::fs;
 use tokio::sync::OnceCell;
 use tokio::time::Instant;
 
-use crate::{Args, err, info, warn};
 use crate::file_operations::FileOperationsManager;
+use crate::{err, info, warn, Args};
 
 pub struct Utils;
 
@@ -140,7 +140,9 @@ impl Utils {
     ) {
         match event.kind {
             EventKind::Create(_) => {
-                FileOperationsManager::create(file_store, emit_time, event).await;
+                if !Utils::args().no_creation_events {
+                    FileOperationsManager::create(file_store, emit_time, event).await;
+                }
             }
             EventKind::Modify(kind) => match kind {
                 ModifyKind::Name(rename) => match rename {
