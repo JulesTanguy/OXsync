@@ -1,10 +1,9 @@
 # oxsync
 Sync changes from a directory to another
 
-![GitHub Workflow Status (with event)](https://img.shields.io/github/actions/workflow/status/JulesTanguy/oxsync/rust.yml?logo=github)
-![Crates.io Version](https://img.shields.io/crates/v/oxsync)
-![GitHub License](https://img.shields.io/github/license/JulesTanguy/oxsync)
-
+[![GitHub Workflow Status (with event)](https://img.shields.io/github/actions/workflow/status/JulesTanguy/oxsync/rust.yml?logo=github)](https://github.com/JulesTanguy/oxsync/actions/workflows/rust.yml)
+[![Crates.io Version](https://img.shields.io/crates/v/oxsync)](https://crates.io/crates/oxsync)
+[![GitHub License](https://img.shields.io/github/license/JulesTanguy/oxsync)](https://github.com/JulesTanguy/oxsync/blob/main/LICENSE)
 ```
 Sync changes from a directory to another
 
