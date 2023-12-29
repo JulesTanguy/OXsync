@@ -1,7 +1,13 @@
 # oxsync
 Sync changes from a directory to another
 
+![GitHub Workflow Status (with event)](https://img.shields.io/github/actions/workflow/status/JulesTanguy/oxsync/rust.yml?logo=github)
+![Crates.io Version](https://img.shields.io/crates/v/oxsync)
+![GitHub License](https://img.shields.io/github/license/JulesTanguy/oxsync)
+
 ```
+Sync changes from a directory to another
+
 Usage: oxsync.exe [OPTIONS] <SOURCE_DIR> <TARGET_DIR>
 
 Arguments:
@@ -9,13 +15,14 @@ Arguments:
   <TARGET_DIR>  Path of the directory to write changes to
 
 Options:
-  -e, --exclude <EXCLUDE>               Exclude file or dir from the <SOURCE_DIR>
-      --exclude-temporary-editor-files  Exclude filenames ending with a tilde `~` [aliases: exclude-tmp]
-      --ide-mode                        Exclude `.git` and `.idea` dirs + enable the `exclude-temporary-editor-files` option [aliases: ide]
-      --statistics                      Get how much time is needed to copy a file [aliases: stats]
-      --trace                           Set the log level to trace
-  -h, --help                            Print help
-  -V, --version                         Print version
+  -e, --exclude <EXCLUDE>          Exclude file or dir from the <SOURCE_DIR>, can be used multiple times
+      --no-temporary-editor-files  Exclude files with names ending by a tilde `~` [aliases: no-tmp]
+      --no-creation-events         Ignore creation events [aliases: no-create]
+      --ide-mode                   Exclude `.git`, `.idea` dirs + enables `no-temporary-editor-files`, `no-creation-events` options [aliases: ide]
+      --statistics                 Display the time spent copying the file [aliases: stats]
+      --trace                      Set the log level to trace
+  -h, --help                       Print help
+  -V, --version                    Print version
 ```
 
 ## Purpose
