@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use blake3::{hash, Hash};
-use lru::LruCache;
 use notify::event::{ModifyKind, RenameMode};
 use notify::Event;
 use notify::EventKind::Modify;
@@ -10,6 +9,7 @@ use tokio::fs;
 use tokio::fs::File;
 use tokio::time::Instant;
 
+use crate::file_store::FileStore;
 use crate::utils::{PathType, Utils};
 use crate::{err, info, PathMetadata};
 
@@ -17,7 +17,7 @@ pub(crate) struct FileOperationsManager;
 
 impl FileOperationsManager {
     pub async fn copy(
-        file_store: &mut LruCache<PathBuf, PathMetadata>,
+        file_store: &FileStore,
         emit_time: Instant,
         event: Event,
     ) {
@@ -42,7 +42,7 @@ impl FileOperationsManager {
             let relative_path = v_path.strip_prefix(&Utils::args().source_dir).unwrap();
             let (dest_path, dirs) = Utils::get_destination_path_and_dirs(relative_path);
 
-            if let Some(path_metadata) = file_store.get(&v_path) {
+            if let Some(path_metadata) = file_store.read(&v_path) {
                 match path_metadata.path_type {
                     PathType::Dir => {
                         if !dest_path.is_dir()
@@ -50,7 +50,7 @@ impl FileOperationsManager {
                                 .await
                                 .is_ok()
                         {
-                            Self::write_in_file_store(file_store, v_path, PathType::Dir, None)
+                            Self::write_in_file_store(&file_store, v_path, PathType::Dir, None)
                                 .await;
                         }
                     }
@@ -62,13 +62,13 @@ impl FileOperationsManager {
                         };
 
                         if current_hash.is_none() {
-                            Self::create_depends_dirs(dirs, path_str, file_store, &emit_time).await;
+                            Self::create_depends_dirs(dirs, path_str, &file_store, &emit_time).await;
 
                             if Utils::copy_file(&v_path, &dest_path, path_str, emit_time)
                                 .await
                                 .is_ok()
                             {
-                                Self::write_in_file_store(file_store, v_path, PathType::File, None)
+                                Self::write_in_file_store(&file_store, v_path, PathType::File, None)
                                     .await;
                             }
                             continue;
@@ -85,14 +85,14 @@ impl FileOperationsManager {
                             info!("file '{}' not copied : content is identical", path_str);
                         } else if file_is_identical {
                         } else {
-                            Self::create_depends_dirs(dirs, path_str, file_store, &emit_time).await;
+                            Self::create_depends_dirs(dirs, path_str, &file_store, &emit_time).await;
 
                             if Utils::copy_file(&v_path, &dest_path, path_str, emit_time)
                                 .await
                                 .is_ok()
                             {
                                 Self::write_in_file_store(
-                                    file_store,
+                                    &file_store,
                                     v_path,
                                     PathType::File,
                                     current_hash,
@@ -106,7 +106,7 @@ impl FileOperationsManager {
             }
 
             if v_path.is_file() {
-                Self::create_depends_dirs(dirs, path_str, file_store, &emit_time).await;
+                Self::create_depends_dirs(dirs, path_str, &file_store, &emit_time).await;
 
                 if Utils::copy_file(&v_path, &dest_path, path_str, emit_time)
                     .await
@@ -118,7 +118,7 @@ impl FileOperationsManager {
                         None
                     };
 
-                    Self::write_in_file_store(file_store, v_path, PathType::File, current_hash)
+                    Self::write_in_file_store(&file_store, v_path, PathType::File, current_hash)
                         .await;
                 }
                 continue;
@@ -130,13 +130,13 @@ impl FileOperationsManager {
                     .await
                     .is_ok()
             {
-                Self::write_in_file_store(file_store, v_path, PathType::Dir, None).await;
+                Self::write_in_file_store(&file_store, v_path, PathType::Dir, None).await;
             }
         }
     }
 
     pub async fn remove(
-        file_store: &mut LruCache<PathBuf, PathMetadata>,
+        file_store: &FileStore,
         emit_time: Instant,
         event: Event,
     ) {
@@ -168,14 +168,14 @@ impl FileOperationsManager {
                 } else {
                     Utils::print_action("deleted", "file", path_str, &emit_time);
                 };
-                file_store.pop(&v_path);
+                file_store.delete(&v_path);
             } else if dest_path.is_dir() {
                 if let Err(err) = fs::remove_dir_all(dest_path).await {
                     handle_remove_err(err, path_str, PathType::Dir);
                 } else {
                     Utils::print_action("deleted", "dir", path_str, &emit_time);
                 };
-                file_store.pop(&v_path);
+                file_store.delete(&v_path);
             } else {
                 err!("remove error: '{}' is not a file or a directory", path_str);
             }
@@ -183,7 +183,7 @@ impl FileOperationsManager {
     }
 
     pub async fn rename(
-        file_store: &mut LruCache<PathBuf, PathMetadata>,
+        file_store: &FileStore,
         emit_time: Instant,
         event: Event,
         rename_from: &mut Option<PathBuf>,
@@ -233,16 +233,18 @@ impl FileOperationsManager {
 
                             Utils::print_action("renamed", path_type_str, path_str, &emit_time);
 
-                            if let Some(mut metadata) = file_store.pop(&old_path) {
+                            if let Some(mut metadata) = file_store.read(&old_path) {
+                                file_store.delete(&old_path);
+
                                 metadata.last_change = SystemTime::now();
-                                file_store.put(v_path, metadata);
+                                file_store.create(v_path, metadata);
                             } else {
                                 let metadata = PathMetadata {
                                     path_type,
                                     hash: None,
                                     last_change: SystemTime::now(),
                                 };
-                                file_store.put(v_path, metadata);
+                                file_store.create(v_path, metadata);
                             }
                         }
                     }
@@ -253,7 +255,7 @@ impl FileOperationsManager {
     }
 
     pub async fn create(
-        file_store: &mut LruCache<PathBuf, PathMetadata>,
+        file_store: &FileStore,
         emit_time: Instant,
         event: Event,
     ) {
@@ -277,12 +279,12 @@ impl FileOperationsManager {
             let relative_path = v_path.strip_prefix(&Utils::args().source_dir).unwrap();
             let (dest_path, dirs) = Utils::get_destination_path_and_dirs(relative_path);
 
-            if file_store.get(&v_path).is_some() {
+            if file_store.read(&v_path).is_some() {
                 continue;
             }
 
             if v_path.is_file() && !dest_path.exists() {
-                Self::create_depends_dirs(dirs, path_str, file_store, &emit_time).await;
+                Self::create_depends_dirs(dirs, path_str, &file_store, &emit_time).await;
 
                 if let Err(err) = File::create(dest_path).await {
                     err!(
@@ -292,33 +294,33 @@ impl FileOperationsManager {
                     );
                 } else {
                     Utils::print_action("created", "file", path_str, &emit_time);
-                    Self::write_in_file_store(file_store, v_path, PathType::File, None).await;
+                    Self::write_in_file_store(&file_store, v_path, PathType::File, None).await;
                 }
                 continue;
             }
 
             if v_path.is_dir() && !dest_path.exists() {
-                Self::create_depends_dirs(dirs, path_str, file_store, &emit_time).await;
+                Self::create_depends_dirs(dirs, path_str, &file_store, &emit_time).await;
 
                 if Utils::create_dirs(&dest_path, path_str, &emit_time, false)
                     .await
                     .is_ok()
                 {
                     Utils::print_action("created", "dir", path_str, &emit_time);
-                    Self::write_in_file_store(file_store, v_path, PathType::Dir, None).await;
+                    Self::write_in_file_store(&file_store, v_path, PathType::Dir, None).await;
                 }
             }
         }
     }
 
     async fn write_in_file_store(
-        file_store: &mut LruCache<PathBuf, PathMetadata>,
+        file_store: &FileStore,
         path: PathBuf,
         path_type: PathType,
         current_hash_opt: Option<Hash>,
     ) {
-        if file_store.get(&path).is_none() {
-            file_store.put(
+        if file_store.read(&path).is_none() {
+            file_store.create(
                 path,
                 PathMetadata {
                     path_type,
@@ -327,18 +329,21 @@ impl FileOperationsManager {
                 },
             );
         } else {
-            let path_metadata = file_store.get_mut(&path).unwrap();
+            // Clone cost seems acceptable
+            let mut path_metadata = file_store.read(&path).unwrap().clone();
             if path_type == PathType::File {
                 path_metadata.hash = current_hash_opt;
+                file_store.update(path.clone(), path_metadata.clone())
             }
             path_metadata.last_change = SystemTime::now();
+            file_store.update(path, path_metadata.clone())
         }
     }
 
     async fn create_depends_dirs(
         dirs: PathBuf,
         path_str: &str,
-        file_store: &mut LruCache<PathBuf, PathMetadata>,
+        file_store: &FileStore,
         emit_time: &Instant,
     ) {
         if !dirs.exists()
@@ -372,7 +377,7 @@ fn handle_remove_err(err: std::io::Error, path_str: &str, entry_type: PathType) 
     };
 
     if let Some(os_error_code) = err.raw_os_error() {
-        // Mute errors 2 & 3 which means that the path does not exists
+        // Mute errors 2 & 3 which means that the path doesn't exist
         if os_error_code != 2 && os_error_code != 3 {
             err!(
                 "failed to remove {} '{}', error: {}",

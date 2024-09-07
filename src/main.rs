@@ -1,20 +1,20 @@
-use std::hash::BuildHasherDefault;
-use std::num::NonZeroUsize;
-use std::path::PathBuf;
-
-use ahash::AHasher;
 use clap::Parser;
-use lru::LruCache;
 use notify::{RecursiveMode, Watcher};
+use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tokio::time::Instant;
 use tokio_stream::StreamExt;
 
+use crate::event_handler::EventHandler;
+use crate::file_store::FileStore;
 use start::Start;
 use utils::PathMetadata;
 use utils::Utils;
 
+mod event_handler;
 mod file_operations;
+mod file_store;
 mod macros;
 mod start;
 mod utils;
@@ -51,9 +51,6 @@ pub struct Args {
 
 pub static LOG_TRACE: OnceCell<bool> = OnceCell::const_new();
 
-#[cfg(not(windows))]
-compile_error!("non-windows targets aren't supported on this version");
-
 #[tokio::main]
 async fn main() {
     Start::parse_args().await;
@@ -69,24 +66,24 @@ async fn init_event_loop() -> notify::Result<()> {
     // below will be monitored for changes.
     watcher.watch(&Utils::args().source_dir, RecursiveMode::Recursive)?;
 
-    let mut file_store: LruCache<PathBuf, PathMetadata> = LruCache::with_hasher(
-        NonZeroUsize::new(32_768).unwrap(),
-        BuildHasherDefault::<AHasher>::default(),
-    );
-
-    let mut rename_from: Option<PathBuf> = None;
+    let file_store = FileStore::new();
 
     info!(
         "Ready - Waiting for changes on '{}'",
         Utils::fmt_path(&Utils::args().source_dir)
     );
+    
+    let eh = Arc::new(EventHandler::new(file_store));
+
     while let Some(res) = rx.next().await {
         match res {
             Ok(event) => {
                 let emit_time = Instant::now();
                 trace!("{:?}", event);
-
-                Utils::handle_event(event, &mut file_store, emit_time, &mut rename_from).await
+                let eee = Arc::clone(&eh);
+                tokio::spawn(async move { 
+                    eee.handle_event(emit_time, event).await;
+                } );
             }
             Err(e) => err!("watch error: {:?}", e),
         }

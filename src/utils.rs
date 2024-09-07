@@ -4,15 +4,11 @@ use std::process::abort;
 use std::time::SystemTime;
 
 use blake3::Hash;
-use lru::LruCache;
-use notify::event::{ModifyKind, RenameMode};
-use notify::{Event, EventKind};
 use tokio::fs;
 use tokio::sync::OnceCell;
 use tokio::time::Instant;
 
-use crate::file_operations::FileOperationsManager;
-use crate::{err, info, warn, Args};
+use crate::{err, info, Args};
 
 pub struct Utils;
 
@@ -130,46 +126,6 @@ impl Utils {
 
     pub fn get_destination_path(relative_path: &Path) -> PathBuf {
         Path::new(&Self::args().target_dir).join(relative_path)
-    }
-
-    pub async fn handle_event(
-        event: Event,
-        file_store: &mut LruCache<PathBuf, PathMetadata>,
-        emit_time: Instant,
-        rename_from: &mut Option<PathBuf>,
-    ) {
-        match event.kind {
-            EventKind::Create(_) => {
-                if !Utils::args().no_creation_events {
-                    FileOperationsManager::create(file_store, emit_time, event).await;
-                }
-            }
-            EventKind::Modify(kind) => match kind {
-                ModifyKind::Name(rename) => match rename {
-                    RenameMode::From => {
-                        FileOperationsManager::rename(file_store, emit_time, event, rename_from)
-                            .await;
-                    }
-                    RenameMode::To => {
-                        FileOperationsManager::rename(file_store, emit_time, event, rename_from)
-                            .await;
-                    }
-                    _ => {
-                        FileOperationsManager::copy(file_store, emit_time, event).await;
-                    }
-                },
-                _ => {
-                    FileOperationsManager::copy(file_store, emit_time, event).await;
-                }
-            },
-            EventKind::Remove(_) => {
-                FileOperationsManager::remove(file_store, emit_time, event).await;
-            }
-            EventKind::Access(_) => {}
-            _ => {
-                warn!("Unknown event: {:?}", event)
-            }
-        }
     }
 
     pub fn print_action(action_verb: &str, type_path: &str, path_str: &str, emit_time: &Instant) {
